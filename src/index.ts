@@ -18,37 +18,40 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+const READ_ONLY = { readOnlyHint: true, destructiveHint: false } as const;
+const WRITE = { readOnlyHint: false, destructiveHint: false } as const;
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true } as const;
+
 // ═══════════════════════════════════════════
 // INTERACTIVE TOOLS (1)
 // ═══════════════════════════════════════════
 
 server.tool(
   "find-tasks-by-date",
-  "Find tasks filtered by due date range. Returns tasks due within the specified date range.",
+  "Find tasks filtered by due date range.",
   {
-    filter: z.string().optional().describe("Todoist filter query (e.g. 'today', 'overdue', 'due before: Jan 1')"),
     due_date: z.string().optional().describe("Specific due date (YYYY-MM-DD)"),
     due_before: z.string().optional().describe("Tasks due before this date (YYYY-MM-DD)"),
     due_after: z.string().optional().describe("Tasks due after this date (YYYY-MM-DD)"),
     project_id: z.string().optional().describe("Filter by project ID"),
   },
+  READ_ONLY,
   async (params) => {
-    const queryParams: Record<string, string> = {};
-    if (params.filter) queryParams.filter = params.filter;
-    if (params.project_id) queryParams.project_id = params.project_id;
-
-    // Build a filter string if date params provided
-    if (!params.filter) {
-      const parts: string[] = [];
-      if (params.due_date) parts.push(`due: ${params.due_date}`);
-      if (params.due_before) parts.push(`due before: ${params.due_before}`);
-      if (params.due_after) parts.push(`due after: ${params.due_after}`);
-      if (parts.length > 0) queryParams.filter = parts.join(" & ");
-    }
-
-    if (!queryParams.filter) queryParams.filter = "today | overdue";
-    const result = await api.getTasks(queryParams);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const allTasks = await api.getTasks(
+      params.project_id ? { project_id: params.project_id } : undefined
+    );
+    const todayStr = new Date().toISOString().split("T")[0];
+    const filtered = allTasks.filter((task) => {
+      const t = task as Record<string, unknown>;
+      const due = t.due as Record<string, string> | null;
+      if (!due?.date) return false;
+      if (params.due_date && due.date !== params.due_date) return false;
+      if (params.due_before && due.date >= params.due_before) return false;
+      if (params.due_after && due.date <= params.due_after) return false;
+      if (!params.due_date && !params.due_before && !params.due_after) return due.date <= todayStr;
+      return true;
+    });
+    return { content: [{ type: "text" as const, text: JSON.stringify(filtered, null, 2) }] };
   }
 );
 
@@ -58,12 +61,13 @@ server.tool(
 
 server.tool(
   "fetch",
-  "Fetch any Todoist API URL directly. Useful for accessing endpoints not covered by other tools.",
+  "Fetch any Todoist API URL directly.",
   {
     url: z.string().describe("Full Todoist API URL to fetch"),
-    method: z.enum(["GET", "POST"]).optional().describe("HTTP method (default: GET)"),
+    method: z.enum(["GET", "POST", "DELETE"]).optional().describe("HTTP method (default: GET)"),
     body: z.record(z.unknown()).optional().describe("Request body for POST requests"),
   },
+  READ_ONLY,
   async (params) => {
     const result = await api.fetchUrl(params.url, params.method || "GET", params.body);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -74,9 +78,10 @@ server.tool(
   "fetch-object",
   "Fetch a specific Todoist object by type and ID.",
   {
-    object_type: z.enum(["task", "project", "section", "comment", "label"]).describe("Type of object to fetch"),
+    object_type: z.enum(["task", "project", "section", "comment", "label"]).describe("Type of object"),
     id: z.string().describe("Object ID"),
   },
+  READ_ONLY,
   async (params) => {
     let result: unknown;
     switch (params.object_type) {
@@ -92,20 +97,17 @@ server.tool(
 
 server.tool(
   "find-activity",
-  "Find activity log events. Shows task completions, additions, updates, and other events.",
+  "Find recent activity (completed tasks) for analysis.",
   {
-    object_type: z.string().optional().describe("Filter by object type (e.g. 'item', 'note', 'project')"),
-    object_id: z.string().optional().describe("Filter by specific object ID"),
-    event_type: z.string().optional().describe("Filter by event type (e.g. 'added', 'updated', 'completed', 'deleted')"),
-    parent_project_id: z.string().optional().describe("Filter by parent project ID"),
-    parent_item_id: z.string().optional().describe("Filter by parent item ID"),
-    page: z.number().optional().describe("Page number for pagination"),
-    limit: z.number().optional().describe("Number of events per page (max 100)"),
-    since: z.string().optional().describe("Return events since this date (YYYY-MM-DDTHH:MM)"),
-    until: z.string().optional().describe("Return events until this date (YYYY-MM-DDTHH:MM)"),
+    project_id: z.string().optional().describe("Filter by project ID"),
+    limit: z.number().optional().describe("Max items to return"),
   },
+  READ_ONLY,
   async (params) => {
-    const result = await api.getActivity(params);
+    const qs: Record<string, string> = {};
+    if (params.project_id) qs.project_id = params.project_id;
+    if (params.limit) qs.limit = String(params.limit);
+    const result = await api.getCompletedTasks(qs);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   }
 );
@@ -117,11 +119,12 @@ server.tool(
     task_id: z.string().optional().describe("Task ID to get comments for"),
     project_id: z.string().optional().describe("Project ID to get comments for"),
   },
+  READ_ONLY,
   async (params) => {
-    const queryParams: Record<string, string> = {};
-    if (params.task_id) queryParams.task_id = params.task_id;
-    if (params.project_id) queryParams.project_id = params.project_id;
-    const result = await api.getComments(queryParams);
+    const qp: Record<string, string> = {};
+    if (params.task_id) qp.task_id = params.task_id;
+    if (params.project_id) qp.project_id = params.project_id;
+    const result = await api.getComments(qp);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   }
 );
@@ -131,76 +134,75 @@ server.tool(
   "Find completed tasks, optionally filtered by project or date range.",
   {
     project_id: z.string().optional().describe("Filter by project ID"),
-    section_id: z.string().optional().describe("Filter by section ID"),
-    since: z.string().optional().describe("Return tasks completed since this date (YYYY-MM-DDTHH:MM)"),
-    until: z.string().optional().describe("Return tasks completed until this date (YYYY-MM-DDTHH:MM)"),
-    limit: z.number().optional().describe("Max number of results (default 30, max 200)"),
+    since: z.string().optional().describe("Since date (YYYY-MM-DDTHH:MM)"),
+    until: z.string().optional().describe("Until date (YYYY-MM-DDTHH:MM)"),
+    limit: z.number().optional().describe("Max results (default 30, max 200)"),
     offset: z.number().optional().describe("Offset for pagination"),
   },
+  READ_ONLY,
   async (params) => {
-    const result = await api.getCompletedTasks(params);
+    const qs: Record<string, string> = {};
+    if (params.project_id) qs.project_id = params.project_id;
+    if (params.since) qs.since = params.since;
+    if (params.until) qs.until = params.until;
+    if (params.limit) qs.limit = String(params.limit);
+    if (params.offset) qs.offset = String(params.offset);
+    const result = await api.getCompletedTasks(qs);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   }
 );
 
 server.tool(
   "find-filters",
-  "Find all user-defined filters.",
+  "Find user-defined filters. Note: Filters are managed through the Todoist app; this provides guidance on using task queries instead.",
   {},
+  READ_ONLY,
   async () => {
-    const result = await api.sync(["filters"]);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const user = await api.getUserInfo();
+    const u = user as Record<string, unknown>;
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          note: "Filters are configured in the Todoist app. Use find-tasks with specific parameters to achieve filter-like behavior.",
+          user_timezone: u.tz_info,
+        }, null, 2),
+      }],
+    };
   }
 );
 
-server.tool(
-  "find-labels",
-  "Find all personal labels.",
-  {},
-  async () => {
-    const result = await api.getLabels();
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  }
-);
+server.tool("find-labels", "Find all personal labels.", {}, READ_ONLY, async () => {
+  const result = await api.getLabels();
+  return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+});
 
 server.tool(
   "find-project-collaborators",
   "Find collaborators on a shared project.",
-  {
-    project_id: z.string().describe("Project ID to get collaborators for"),
-  },
+  { project_id: z.string().describe("Project ID") },
+  READ_ONLY,
   async (params) => {
     const result = await api.getProjectCollaborators(params.project_id);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   }
 );
 
-server.tool(
-  "find-projects",
-  "Find all projects, optionally filtered.",
-  {},
-  async () => {
-    const result = await api.getProjects();
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  }
-);
+server.tool("find-projects", "Find all projects.", {}, READ_ONLY, async () => {
+  const result = await api.getProjects();
+  return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+});
 
-server.tool(
-  "find-reminders",
-  "Find all reminders.",
-  {},
-  async () => {
-    const result = await api.sync(["reminders"]);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  }
-);
+server.tool("find-reminders", "Find all reminders.", {}, READ_ONLY, async () => {
+  const result = await api.getReminders();
+  return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+});
 
 server.tool(
   "find-sections",
   "Find sections, optionally filtered by project.",
-  {
-    project_id: z.string().optional().describe("Filter by project ID"),
-  },
+  { project_id: z.string().optional().describe("Filter by project ID") },
+  READ_ONLY,
   async (params) => {
     const result = await api.getSections(params.project_id);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -214,262 +216,180 @@ server.tool(
     project_id: z.string().optional().describe("Filter by project ID"),
     section_id: z.string().optional().describe("Filter by section ID"),
     label: z.string().optional().describe("Filter by label name"),
-    filter: z.string().optional().describe("Todoist filter query string"),
-    ids: z.array(z.string()).optional().describe("Array of specific task IDs to fetch"),
-    parent_id: z.string().optional().describe("Filter by parent task ID (for subtasks)"),
+    ids: z.array(z.string()).optional().describe("Specific task IDs"),
+    parent_id: z.string().optional().describe("Filter by parent task ID"),
   },
+  READ_ONLY,
   async (params) => {
-    const queryParams: Record<string, string> = {};
-    if (params.project_id) queryParams.project_id = params.project_id;
-    if (params.section_id) queryParams.section_id = params.section_id;
-    if (params.label) queryParams.label = params.label;
-    if (params.filter) queryParams.filter = params.filter;
-    if (params.ids) queryParams.ids = params.ids.join(",");
-    if (params.parent_id) queryParams.parent_id = params.parent_id;
-    const result = await api.getTasks(queryParams);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const qp: Record<string, string> = {};
+    if (params.project_id) qp.project_id = params.project_id;
+    if (params.section_id) qp.section_id = params.section_id;
+
+    let tasks = await api.getTasks(Object.keys(qp).length > 0 ? qp : undefined);
+
+    if (params.label) tasks = tasks.filter((t) => ((t as Record<string, unknown>).labels as string[] || []).includes(params.label!));
+    if (params.ids) { const s = new Set(params.ids); tasks = tasks.filter((t) => s.has(String((t as Record<string, unknown>).id))); }
+    if (params.parent_id) tasks = tasks.filter((t) => String((t as Record<string, unknown>).parent_id) === params.parent_id);
+
+    return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
   }
 );
 
-server.tool(
-  "get-overview",
-  "Get a high-level overview of your Todoist workspace: projects, task counts, and upcoming items.",
-  {},
-  async () => {
-    const [projects, tasks, labels] = await Promise.all([
-      api.getProjects() as Promise<unknown[]>,
-      api.getTasks({ filter: "all" }) as Promise<unknown[]>,
-      api.getLabels() as Promise<unknown[]>,
-    ]);
+server.tool("get-overview", "Workspace overview: projects, task counts, upcoming items.", {}, READ_ONLY, async () => {
+  const [projects, tasks, labels] = await Promise.all([api.getProjects(), api.getTasks(), api.getLabels()]);
+  const tasksByProject: Record<string, number> = {};
+  const overdueTasks: unknown[] = [];
+  const todayTasks: unknown[] = [];
+  const todayStr = new Date().toISOString().split("T")[0];
 
-    const tasksByProject: Record<string, number> = {};
-    const overdueTasks: unknown[] = [];
-    const todayTasks: unknown[] = [];
-    const now = new Date();
-    const todayStr = now.toISOString().split("T")[0];
-
-    for (const task of tasks) {
-      const t = task as Record<string, unknown>;
-      const projectId = String(t.project_id || "none");
-      tasksByProject[projectId] = (tasksByProject[projectId] || 0) + 1;
-
-      const due = t.due as Record<string, string> | null;
-      if (due?.date) {
-        if (due.date < todayStr) overdueTasks.push(task);
-        else if (due.date === todayStr) todayTasks.push(task);
-      }
+  for (const task of tasks) {
+    const t = task as Record<string, unknown>;
+    const pid = String(t.project_id || "none");
+    tasksByProject[pid] = (tasksByProject[pid] || 0) + 1;
+    const due = t.due as Record<string, string> | null;
+    if (due?.date) {
+      if (due.date < todayStr) overdueTasks.push(task);
+      else if (due.date === todayStr) todayTasks.push(task);
     }
-
-    const overview = {
-      total_projects: projects.length,
-      total_active_tasks: tasks.length,
-      total_labels: labels.length,
-      overdue_count: overdueTasks.length,
-      today_count: todayTasks.length,
-      tasks_by_project: tasksByProject,
-      overdue_tasks: overdueTasks.slice(0, 10),
-      today_tasks: todayTasks.slice(0, 10),
-    };
-
-    return { content: [{ type: "text" as const, text: JSON.stringify(overview, null, 2) }] };
   }
-);
 
-server.tool(
-  "get-productivity-stats",
-  "Get productivity statistics: completed tasks, karma, streaks, goals, and daily/weekly trends.",
-  {},
-  async () => {
-    const result = await api.getProductivityStats();
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  }
-);
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        total_projects: projects.length, total_active_tasks: tasks.length, total_labels: labels.length,
+        overdue_count: overdueTasks.length, today_count: todayTasks.length,
+        tasks_by_project: tasksByProject,
+        overdue_tasks: overdueTasks.slice(0, 10), today_tasks: todayTasks.slice(0, 10),
+      }, null, 2),
+    }],
+  };
+});
+
+server.tool("get-productivity-stats", "Productivity stats: karma, streaks, goals, trends.", {}, READ_ONLY, async () => {
+  const result = await api.getCompletedStats();
+  return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+});
 
 server.tool(
   "get-project-activity-stats",
-  "Get activity statistics for a specific project.",
-  {
-    project_id: z.string().describe("Project ID to get activity stats for"),
-    event_type: z.string().optional().describe("Filter by event type"),
-    since: z.string().optional().describe("Since date (YYYY-MM-DDTHH:MM)"),
-    until: z.string().optional().describe("Until date (YYYY-MM-DDTHH:MM)"),
-    limit: z.number().optional().describe("Max events to return"),
-  },
+  "Activity stats for a specific project (completed tasks).",
+  { project_id: z.string().describe("Project ID"), limit: z.number().optional().describe("Max items") },
+  READ_ONLY,
   async (params) => {
-    const result = await api.getActivity({
-      parent_project_id: params.project_id,
-      event_type: params.event_type,
-      since: params.since,
-      until: params.until,
-      limit: params.limit || 50,
-    });
+    const qs: Record<string, string> = { project_id: params.project_id };
+    if (params.limit) qs.limit = String(params.limit);
+    const result = await api.getCompletedTasks(qs);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   }
 );
 
 server.tool(
   "get-project-health",
-  "Analyze the health of a project: task distribution, overdue items, completion rate, and stale tasks.",
-  {
-    project_id: z.string().describe("Project ID to analyze"),
-  },
+  "Analyze project health: task distribution, overdue items, completion rate.",
+  { project_id: z.string().describe("Project ID to analyze") },
+  READ_ONLY,
   async (params) => {
     const [tasks, sections, completedData] = await Promise.all([
-      api.getTasks({ project_id: params.project_id }) as Promise<unknown[]>,
-      api.getSections(params.project_id) as Promise<unknown[]>,
-      api.getCompletedTasks({ project_id: params.project_id, limit: 50 }),
+      api.getTasks({ project_id: params.project_id }),
+      api.getSections(params.project_id),
+      api.getCompletedTasks({ project_id: params.project_id, limit: "50" }),
     ]);
-
-    const now = new Date();
-    const todayStr = now.toISOString().split("T")[0];
-    let overdue = 0;
-    let dueToday = 0;
-    let noDue = 0;
-    let highPriority = 0;
+    const todayStr = new Date().toISOString().split("T")[0];
+    let overdue = 0, dueToday = 0, noDue = 0, highPriority = 0;
     const tasksBySection: Record<string, number> = {};
-
     for (const task of tasks) {
       const t = task as Record<string, unknown>;
       const due = t.due as Record<string, string> | null;
-      if (!due) { noDue++; }
-      else if (due.date < todayStr) { overdue++; }
-      else if (due.date === todayStr) { dueToday++; }
-
+      if (!due) noDue++; else if (due.date < todayStr) overdue++; else if (due.date === todayStr) dueToday++;
       if ((t.priority as number) >= 3) highPriority++;
       const sid = String(t.section_id || "unsectioned");
       tasksBySection[sid] = (tasksBySection[sid] || 0) + 1;
     }
-
     const completed = completedData as Record<string, unknown>;
     const completedItems = (completed.items || []) as unknown[];
-
-    const health = {
-      project_id: params.project_id,
-      active_tasks: tasks.length,
-      sections: sections.length,
-      recently_completed: completedItems.length,
-      overdue_tasks: overdue,
-      due_today: dueToday,
-      no_due_date: noDue,
-      high_priority_tasks: highPriority,
-      tasks_by_section: tasksBySection,
-      health_score:
-        overdue === 0 && noDue < tasks.length * 0.3
-          ? "healthy"
-          : overdue > tasks.length * 0.5
-            ? "critical"
-            : "needs_attention",
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          project_id: params.project_id, active_tasks: tasks.length, sections: sections.length,
+          recently_completed: completedItems.length, overdue_tasks: overdue, due_today: dueToday,
+          no_due_date: noDue, high_priority_tasks: highPriority, tasks_by_section: tasksBySection,
+          health_score: overdue === 0 && noDue < tasks.length * 0.3 ? "healthy" : overdue > tasks.length * 0.5 ? "critical" : "needs_attention",
+        }, null, 2),
+      }],
     };
-
-    return { content: [{ type: "text" as const, text: JSON.stringify(health, null, 2) }] };
   }
 );
 
-server.tool(
-  "get-workspace-insights",
-  "Get insights across the entire workspace: task distribution, label usage, priority breakdown.",
-  {},
-  async () => {
-    const [projects, tasks, labels] = await Promise.all([
-      api.getProjects() as Promise<unknown[]>,
-      api.getTasks({ filter: "all" }) as Promise<unknown[]>,
-      api.getLabels() as Promise<unknown[]>,
-    ]);
-
-    const priorityBreakdown: Record<string, number> = { p1: 0, p2: 0, p3: 0, p4: 0 };
-    const labelUsage: Record<string, number> = {};
-    const projectSizes: Array<{ name: string; id: string; count: number }> = [];
-
-    const tasksByProject: Record<string, number> = {};
-    for (const task of tasks) {
-      const t = task as Record<string, unknown>;
-      const p = t.priority as number;
-      priorityBreakdown[`p${p}`] = (priorityBreakdown[`p${p}`] || 0) + 1;
-
-      const taskLabels = t.labels as string[] | undefined;
-      if (taskLabels) {
-        for (const l of taskLabels) {
-          labelUsage[l] = (labelUsage[l] || 0) + 1;
-        }
-      }
-
-      const pid = String(t.project_id);
-      tasksByProject[pid] = (tasksByProject[pid] || 0) + 1;
-    }
-
-    for (const proj of projects) {
-      const p = proj as Record<string, unknown>;
-      projectSizes.push({
-        name: String(p.name),
-        id: String(p.id),
-        count: tasksByProject[String(p.id)] || 0,
-      });
-    }
-    projectSizes.sort((a, b) => b.count - a.count);
-
-    const insights = {
-      total_projects: projects.length,
-      total_tasks: tasks.length,
-      total_labels: labels.length,
-      priority_breakdown: priorityBreakdown,
-      label_usage: labelUsage,
-      projects_by_size: projectSizes.slice(0, 20),
-    };
-
-    return { content: [{ type: "text" as const, text: JSON.stringify(insights, null, 2) }] };
+server.tool("get-workspace-insights", "Cross-workspace analytics: task distribution, label usage, priorities.", {}, READ_ONLY, async () => {
+  const [projects, tasks, labels] = await Promise.all([api.getProjects(), api.getTasks(), api.getLabels()]);
+  const priorityBreakdown: Record<string, number> = { p1: 0, p2: 0, p3: 0, p4: 0 };
+  const labelUsage: Record<string, number> = {};
+  const tasksByProject: Record<string, number> = {};
+  for (const task of tasks) {
+    const t = task as Record<string, unknown>;
+    priorityBreakdown[`p${t.priority}`] = (priorityBreakdown[`p${t.priority}`] || 0) + 1;
+    for (const l of (t.labels as string[] || [])) labelUsage[l] = (labelUsage[l] || 0) + 1;
+    const pid = String(t.project_id); tasksByProject[pid] = (tasksByProject[pid] || 0) + 1;
   }
-);
+  const projectSizes = projects.map((p) => {
+    const proj = p as Record<string, unknown>;
+    return { name: String(proj.name), id: String(proj.id), count: tasksByProject[String(proj.id)] || 0 };
+  }).sort((a, b) => b.count - a.count);
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        total_projects: projects.length, total_tasks: tasks.length, total_labels: labels.length,
+        priority_breakdown: priorityBreakdown, label_usage: labelUsage, projects_by_size: projectSizes.slice(0, 20),
+      }, null, 2),
+    }],
+  };
+});
 
-server.tool(
-  "list-workspaces",
-  "List all available workspaces (for Todoist Business/Team accounts).",
-  {},
-  async () => {
-    // Personal accounts have a single implicit workspace.
-    // For team accounts, this comes from the sync API user data.
-    const result = await api.sync(["user", "collaborators"]);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  }
-);
+server.tool("list-workspaces", "List workspace info (user account details).", {}, READ_ONLY, async () => {
+  const user = await api.getUserInfo();
+  return { content: [{ type: "text" as const, text: JSON.stringify(user, null, 2) }] };
+});
 
 server.tool(
   "search",
-  "Search across tasks using Todoist's filter query language.",
-  {
-    query: z.string().describe("Search query — can be a text search or Todoist filter syntax (e.g. 'search: meeting', '#ProjectName', '@label', 'p1')"),
-  },
+  "Search tasks by content, description, or label name.",
+  { query: z.string().describe("Search text"), project_id: z.string().optional().describe("Narrow to project") },
+  READ_ONLY,
   async (params) => {
-    // Todoist filter API is the search mechanism
-    const result = await api.getTasks({ filter: params.query });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const qp: Record<string, string> = {};
+    if (params.project_id) qp.project_id = params.project_id;
+    const tasks = await api.getTasks(Object.keys(qp).length > 0 ? qp : undefined);
+    const q = params.query.toLowerCase();
+    const matches = tasks.filter((task) => {
+      const t = task as Record<string, unknown>;
+      return String(t.content || "").toLowerCase().includes(q)
+        || String(t.description || "").toLowerCase().includes(q)
+        || (t.labels as string[] || []).join(" ").toLowerCase().includes(q);
+    });
+    return { content: [{ type: "text" as const, text: JSON.stringify(matches, null, 2) }] };
   }
 );
 
-server.tool(
-  "user-info",
-  "Get information about the authenticated user: name, email, timezone, karma, plan.",
-  {},
-  async () => {
-    const result = await api.sync(["user"]);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  }
-);
+server.tool("user-info", "Get authenticated user info: name, email, timezone, karma.", {}, READ_ONLY, async () => {
+  const result = await api.getUserInfo();
+  return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+});
 
 server.tool(
   "view-attachment",
   "View attachment details from a comment.",
-  {
-    comment_id: z.string().describe("Comment ID containing the attachment"),
-  },
+  { comment_id: z.string().describe("Comment ID") },
+  READ_ONLY,
   async (params) => {
     const comment = (await api.getComment(params.comment_id)) as Record<string, unknown>;
-    const attachment = comment.attachment || null;
+    const attachment = comment.file_attachment || null;
     return {
       content: [{
         type: "text" as const,
-        text: attachment
-          ? JSON.stringify(attachment, null, 2)
-          : "No attachment found on this comment.",
+        text: attachment ? JSON.stringify(attachment, null, 2) : "No attachment found on this comment.",
       }],
     };
   }
@@ -481,14 +401,15 @@ server.tool(
 
 server.tool(
   "add-comments",
-  "Add one or more comments to tasks or projects.",
+  "Add comments to tasks or projects.",
   {
     comments: z.array(z.object({
-      task_id: z.string().optional().describe("Task ID to comment on"),
-      project_id: z.string().optional().describe("Project ID to comment on"),
-      content: z.string().describe("Comment text (supports Markdown)"),
-    })).describe("Array of comments to add"),
+      task_id: z.string().optional().describe("Task ID"),
+      project_id: z.string().optional().describe("Project ID"),
+      content: z.string().describe("Comment text (Markdown supported)"),
+    })).describe("Comments to add"),
   },
+  WRITE,
   async (params) => {
     const results = [];
     for (const c of params.comments) {
@@ -503,235 +424,210 @@ server.tool(
 
 server.tool(
   "add-filters",
-  "Add one or more custom filters.",
+  "Create named search filters. Note: API v1 does not expose a filters endpoint; use find-tasks with parameters instead.",
   {
     filters: z.array(z.object({
       name: z.string().describe("Filter name"),
-      query: z.string().describe("Filter query string"),
-      color: z.string().optional().describe("Filter color"),
-      is_favorite: z.boolean().optional().describe("Whether filter is a favorite"),
-    })).describe("Array of filters to create"),
+      query: z.string().describe("Filter query"),
+      color: z.string().optional(),
+      is_favorite: z.boolean().optional(),
+    })),
   },
+  WRITE,
   async (params) => {
-    const commands = params.filters.map((f) => ({
-      type: "filter_add",
-      args: {
-        name: f.name,
-        query: f.query,
-        ...(f.color && { color: f.color }),
-        ...(f.is_favorite !== undefined && { is_favorite: f.is_favorite }),
-      },
-    }));
-    const result = await api.syncWriteCommands(commands);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          note: "Filter creation is not available via API v1. Manage filters in the Todoist app. Use find-tasks for query-based filtering.",
+          filters: params.filters,
+        }, null, 2),
+      }],
+    };
   }
 );
 
 server.tool(
   "add-labels",
-  "Add one or more personal labels.",
+  "Create personal labels.",
   {
     labels: z.array(z.object({
       name: z.string().describe("Label name"),
-      color: z.string().optional().describe("Label color"),
-      order: z.number().optional().describe("Label order"),
-      is_favorite: z.boolean().optional().describe("Whether label is a favorite"),
-    })).describe("Array of labels to create"),
+      color: z.string().optional(),
+      order: z.number().optional(),
+      is_favorite: z.boolean().optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const l of params.labels) {
-      results.push(await api.createLabel(l));
-    }
+    for (const l of params.labels) results.push(await api.createLabel(l));
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "add-projects",
-  "Add one or more projects.",
+  "Create projects.",
   {
     projects: z.array(z.object({
       name: z.string().describe("Project name"),
-      parent_id: z.string().optional().describe("Parent project ID (for sub-projects)"),
-      color: z.string().optional().describe("Project color"),
-      is_favorite: z.boolean().optional().describe("Whether project is a favorite"),
-      view_style: z.enum(["list", "board"]).optional().describe("View style"),
-    })).describe("Array of projects to create"),
+      parent_id: z.string().optional().describe("Parent project ID"),
+      color: z.string().optional(),
+      is_favorite: z.boolean().optional(),
+      view_style: z.enum(["list", "board"]).optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const p of params.projects) {
-      results.push(await api.createProject(p));
-    }
+    for (const p of params.projects) results.push(await api.createProject(p));
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "add-reminders",
-  "Add reminders to tasks.",
+  "Add task reminders. Requires Todoist Pro.",
   {
     reminders: z.array(z.object({
-      item_id: z.string().describe("Task ID to add reminder to"),
-      type: z.enum(["relative", "absolute", "location"]).optional().describe("Reminder type"),
+      task_id: z.string().describe("Task ID"),
+      type: z.enum(["relative", "absolute", "location"]).optional(),
       due: z.object({
-        date: z.string().optional().describe("Due date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
-        timezone: z.string().optional().describe("Timezone"),
-        string: z.string().optional().describe("Natural language due string"),
-        lang: z.string().optional().describe("Language for due string"),
-      }).optional().describe("Due specification for absolute reminders"),
-      minute_offset: z.number().optional().describe("Minutes before due date for relative reminders"),
-    })).describe("Array of reminders to add"),
+        date: z.string().optional(),
+        timezone: z.string().optional(),
+        string: z.string().optional(),
+      }).optional(),
+      minute_offset: z.number().optional().describe("Minutes before due date"),
+    })),
   },
+  WRITE,
   async (params) => {
-    const commands = params.reminders.map((r) => ({
-      type: "reminder_add",
-      args: r,
-    }));
-    const result = await api.syncWriteCommands(commands);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const results = [];
+    for (const r of params.reminders) results.push(await api.createReminder(r));
+    return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "add-sections",
-  "Add one or more sections to a project.",
+  "Create sections in a project.",
   {
     sections: z.array(z.object({
       name: z.string().describe("Section name"),
-      project_id: z.string().describe("Project ID to add section to"),
-      order: z.number().optional().describe("Section order"),
-    })).describe("Array of sections to create"),
+      project_id: z.string().describe("Project ID"),
+      order: z.number().optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const s of params.sections) {
-      results.push(await api.createSection(s));
-    }
+    for (const s of params.sections) results.push(await api.createSection(s));
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "add-tasks",
-  "Add one or more tasks.",
+  "Create tasks.",
   {
     tasks: z.array(z.object({
-      content: z.string().describe("Task title/content"),
-      description: z.string().optional().describe("Task description"),
-      project_id: z.string().optional().describe("Project ID"),
-      section_id: z.string().optional().describe("Section ID"),
-      parent_id: z.string().optional().describe("Parent task ID (for subtasks)"),
-      order: z.number().optional().describe("Task order"),
-      labels: z.array(z.string()).optional().describe("Array of label names"),
-      priority: z.number().optional().describe("Priority (1=normal, 2=medium, 3=high, 4=urgent)"),
-      due_string: z.string().optional().describe("Natural language due date (e.g. 'tomorrow', 'every monday')"),
-      due_date: z.string().optional().describe("Specific due date (YYYY-MM-DD)"),
-      due_datetime: z.string().optional().describe("Specific due datetime (YYYY-MM-DDTHH:MM:SSZ)"),
-      due_lang: z.string().optional().describe("Language for due_string"),
-      assignee_id: z.string().optional().describe("User ID to assign the task to"),
-      duration: z.number().optional().describe("Task duration amount"),
-      duration_unit: z.enum(["minute", "day"]).optional().describe("Task duration unit"),
-    })).describe("Array of tasks to create"),
+      content: z.string().describe("Task title"),
+      description: z.string().optional(),
+      project_id: z.string().optional(),
+      section_id: z.string().optional(),
+      parent_id: z.string().optional().describe("Parent task ID (subtask)"),
+      order: z.number().optional(),
+      labels: z.array(z.string()).optional(),
+      priority: z.number().optional().describe("1=normal, 2=medium, 3=high, 4=urgent"),
+      due_string: z.string().optional().describe("Natural language due date"),
+      due_date: z.string().optional().describe("YYYY-MM-DD"),
+      due_datetime: z.string().optional().describe("YYYY-MM-DDTHH:MM:SSZ"),
+      due_lang: z.string().optional(),
+      assignee_id: z.string().optional(),
+      duration: z.number().optional(),
+      duration_unit: z.enum(["minute", "day"]).optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const t of params.tasks) {
-      results.push(await api.createTask(t as Record<string, unknown>));
-    }
+    for (const t of params.tasks) results.push(await api.createTask(t as Record<string, unknown>));
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "analyze-project-health",
-  "Run a health analysis on a project and return actionable insights.",
+  "Deep project health analysis with actionable suggestions.",
   {
-    project_id: z.string().describe("Project ID to analyze"),
-    include_suggestions: z.boolean().optional().describe("Include improvement suggestions (default true)"),
+    project_id: z.string().describe("Project ID"),
+    include_suggestions: z.boolean().optional().describe("Include suggestions (default true)"),
   },
+  READ_ONLY,
   async (params) => {
-    const [tasks, sections, project, completedData, activity] = await Promise.all([
-      api.getTasks({ project_id: params.project_id }) as Promise<unknown[]>,
-      api.getSections(params.project_id) as Promise<unknown[]>,
+    const [tasks, sections, project, completedData] = await Promise.all([
+      api.getTasks({ project_id: params.project_id }),
+      api.getSections(params.project_id),
       api.getProject(params.project_id) as Promise<Record<string, unknown>>,
-      api.getCompletedTasks({ project_id: params.project_id, limit: 100 }),
-      api.getActivity({ parent_project_id: params.project_id, limit: 50 }),
+      api.getCompletedTasks({ project_id: params.project_id, limit: "100" }),
     ]);
-
-    const now = new Date();
-    const todayStr = now.toISOString().split("T")[0];
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000).toISOString().split("T")[0];
-
-    let overdue = 0, dueToday = 0, noDue = 0, p1Count = 0, p2Count = 0;
-    const staleTasks: unknown[] = [];
-
+    const todayStr = new Date().toISOString().split("T")[0];
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    let overdue = 0, dueToday = 0, noDue = 0, p1 = 0, p2 = 0;
+    const stale: unknown[] = [];
     for (const task of tasks) {
       const t = task as Record<string, unknown>;
       const due = t.due as Record<string, string> | null;
-      if (!due) { noDue++; }
-      else if (due.date < todayStr) { overdue++; }
-      else if (due.date === todayStr) { dueToday++; }
-
-      const priority = t.priority as number;
-      if (priority === 4) p1Count++;
-      if (priority === 3) p2Count++;
-
-      if (!due && t.created_at && (t.created_at as string) < sevenDaysAgo) {
-        staleTasks.push(task);
-      }
+      if (!due) noDue++; else if (due.date < todayStr) overdue++; else if (due.date === todayStr) dueToday++;
+      if ((t.priority as number) === 4) p1++;
+      if ((t.priority as number) === 3) p2++;
+      if (!due && t.added_at && (t.added_at as string) < weekAgo) stale.push(task);
     }
-
     const completed = completedData as Record<string, unknown>;
-    const completedItems = (completed.items || []) as unknown[];
-
+    const items = (completed.items || []) as unknown[];
     const suggestions: string[] = [];
     if (params.include_suggestions !== false) {
-      if (overdue > 0) suggestions.push(`${overdue} overdue tasks need attention — reschedule or complete them.`);
-      if (noDue > tasks.length * 0.5) suggestions.push("Over half your tasks have no due date. Consider adding dates to improve planning.");
-      if (staleTasks.length > 0) suggestions.push(`${staleTasks.length} tasks are over a week old with no due date — review and prioritize or archive.`);
-      if (completedItems.length === 0) suggestions.push("No recently completed tasks — the project may be stalled.");
-      if (p1Count > 3) suggestions.push("Many urgent (p1) tasks — consider if all truly need urgent priority.");
+      if (overdue > 0) suggestions.push(`${overdue} overdue tasks need attention.`);
+      if (noDue > tasks.length * 0.5) suggestions.push("Over half your tasks have no due date.");
+      if (stale.length > 0) suggestions.push(`${stale.length} tasks over a week old with no due date.`);
+      if (items.length === 0) suggestions.push("No recently completed tasks — project may be stalled.");
+      if (p1 > 3) suggestions.push("Many urgent (p1) tasks — review priorities.");
     }
-
-    const analysis = {
-      project: { name: project.name, id: project.id },
-      active_tasks: tasks.length,
-      sections: sections.length,
-      recently_completed: completedItems.length,
-      metrics: { overdue, due_today: dueToday, no_due_date: noDue, p1_urgent: p1Count, p2_high: p2Count, stale_tasks: staleTasks.length },
-      health_score: overdue === 0 && staleTasks.length < 3 ? "healthy" : overdue > tasks.length * 0.3 ? "critical" : "needs_attention",
-      suggestions,
-      activity_summary: activity,
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          project: { name: project.name, id: project.id }, active_tasks: tasks.length, sections: sections.length,
+          recently_completed: items.length,
+          metrics: { overdue, due_today: dueToday, no_due_date: noDue, p1_urgent: p1, p2_high: p2, stale_tasks: stale.length },
+          health_score: overdue === 0 && stale.length < 3 ? "healthy" : overdue > tasks.length * 0.3 ? "critical" : "needs_attention",
+          suggestions,
+        }, null, 2),
+      }],
     };
-
-    return { content: [{ type: "text" as const, text: JSON.stringify(analysis, null, 2) }] };
   }
 );
 
 server.tool(
   "complete-tasks",
-  "Mark one or more tasks as complete.",
-  {
-    ids: z.array(z.string()).describe("Array of task IDs to complete"),
-  },
+  "Mark tasks as complete.",
+  { ids: z.array(z.string()).describe("Task IDs to complete") },
+  WRITE,
   async (params) => {
-    const results = [];
-    for (const id of params.ids) {
-      results.push(await api.closeTask(id));
-    }
+    for (const id of params.ids) await api.closeTask(id);
     return { content: [{ type: "text" as const, text: `Completed ${params.ids.length} task(s).` }] };
   }
 );
 
 server.tool(
   "delete-object",
-  "Delete a Todoist object (task, project, section, comment, label).",
+  "Delete a Todoist object.",
   {
-    object_type: z.enum(["task", "project", "section", "comment", "label"]).describe("Type of object to delete"),
-    id: z.string().describe("Object ID to delete"),
+    object_type: z.enum(["task", "project", "section", "comment", "label"]).describe("Object type"),
+    id: z.string().describe("Object ID"),
   },
+  DESTRUCTIVE,
   async (params) => {
     switch (params.object_type) {
       case "task": await api.deleteTask(params.id); break;
@@ -746,55 +642,37 @@ server.tool(
 
 server.tool(
   "manage-assignments",
-  "Assign or unassign tasks to collaborators in shared projects.",
+  "Assign or unassign tasks in shared projects.",
   {
     assignments: z.array(z.object({
-      task_id: z.string().describe("Task ID to assign"),
-      assignee_id: z.string().nullable().describe("User ID to assign to, or null to unassign"),
-    })).describe("Array of assignment changes"),
+      task_id: z.string().describe("Task ID"),
+      assignee_id: z.string().nullable().describe("User ID or null to unassign"),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const a of params.assignments) {
-      const data: Record<string, unknown> = {};
-      if (a.assignee_id) {
-        data.assignee_id = a.assignee_id;
-      } else {
-        data.assignee_id = null;
-      }
-      results.push(await api.updateTask(a.task_id, data));
-    }
+    for (const a of params.assignments) results.push(await api.updateTask(a.task_id, { assignee_id: a.assignee_id }));
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "project-management",
-  "Perform bulk project management operations: archive, unarchive, or update multiple projects.",
+  "Bulk project operations: update or delete.",
   {
     operations: z.array(z.object({
       project_id: z.string().describe("Project ID"),
-      action: z.enum(["archive", "unarchive", "update", "delete"]).describe("Action to perform"),
-      data: z.record(z.unknown()).optional().describe("Update data (for 'update' action)"),
-    })).describe("Array of project operations"),
+      action: z.enum(["update", "delete"]).describe("Action"),
+      data: z.record(z.unknown()).optional().describe("Update data"),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
     for (const op of params.operations) {
-      switch (op.action) {
-        case "archive":
-          results.push(await api.syncWriteCommands([{ type: "project_archive", args: { id: op.project_id } }]));
-          break;
-        case "unarchive":
-          results.push(await api.syncWriteCommands([{ type: "project_unarchive", args: { id: op.project_id } }]));
-          break;
-        case "update":
-          results.push(await api.updateProject(op.project_id, op.data || {}));
-          break;
-        case "delete":
-          results.push(await api.deleteProject(op.project_id));
-          break;
-      }
+      if (op.action === "update") results.push(await api.updateProject(op.project_id, op.data || {}));
+      else results.push(await api.deleteProject(op.project_id));
     }
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
@@ -802,20 +680,19 @@ server.tool(
 
 server.tool(
   "project-move",
-  "Move a project to become a child of another project or to the root level.",
+  "Reposition a project by updating its order.",
   {
-    project_id: z.string().describe("Project ID to move"),
-    parent_id: z.string().nullable().optional().describe("New parent project ID, or null to move to root"),
+    project_id: z.string().describe("Project ID"),
+    child_order: z.number().optional().describe("New order position"),
+    is_favorite: z.boolean().optional(),
   },
+  WRITE,
   async (params) => {
-    const commands = [{
-      type: "project_move",
-      args: {
-        id: params.project_id,
-        parent_id: params.parent_id || null,
-      },
-    }];
-    const result = await api.syncWriteCommands(commands);
+    const data: Record<string, unknown> = {};
+    if (params.child_order !== undefined) data.child_order = params.child_order;
+    if (params.is_favorite !== undefined) data.is_favorite = params.is_favorite;
+    if (Object.keys(data).length === 0) data.child_order = 0;
+    const result = await api.updateProject(params.project_id, data);
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   }
 );
@@ -824,40 +701,35 @@ server.tool(
   "reorder-objects",
   "Reorder tasks, projects, or sections.",
   {
-    object_type: z.enum(["task", "project", "section"]).describe("Type of objects to reorder"),
-    items: z.array(z.object({
-      id: z.string().describe("Object ID"),
-      child_order: z.number().describe("New order position"),
-    })).describe("Array of items with their new order"),
+    object_type: z.enum(["task", "project", "section"]).describe("Object type"),
+    items: z.array(z.object({ id: z.string(), child_order: z.number() })).describe("Items with new order"),
   },
+  WRITE,
   async (params) => {
-    const typeMap: Record<string, string> = {
-      task: "item_reorder",
-      project: "project_reorder",
-      section: "section_reorder",
-    };
-    const commands = [{
-      type: typeMap[params.object_type],
-      args: {
-        items: params.items,
-      },
-    }];
-    const result = await api.syncWriteCommands(commands);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const results = [];
+    for (const item of params.items) {
+      switch (params.object_type) {
+        case "task": results.push(await api.updateTask(item.id, { child_order: item.child_order })); break;
+        case "project": results.push(await api.updateProject(item.id, { child_order: item.child_order })); break;
+        case "section": results.push(await api.updateSection(item.id, { order: item.child_order })); break;
+      }
+    }
+    return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "reschedule-tasks",
-  "Reschedule one or more tasks with new due dates.",
+  "Reschedule tasks with new due dates.",
   {
     tasks: z.array(z.object({
       id: z.string().describe("Task ID"),
-      due_string: z.string().optional().describe("Natural language due date"),
-      due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
-      due_datetime: z.string().optional().describe("Due datetime (YYYY-MM-DDTHH:MM:SSZ)"),
-    })).describe("Array of tasks to reschedule"),
+      due_string: z.string().optional(),
+      due_date: z.string().optional(),
+      due_datetime: z.string().optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
     for (const t of params.tasks) {
@@ -873,188 +745,130 @@ server.tool(
 
 server.tool(
   "uncomplete-tasks",
-  "Reopen one or more completed tasks.",
-  {
-    ids: z.array(z.string()).describe("Array of task IDs to reopen"),
-  },
+  "Reopen completed tasks.",
+  { ids: z.array(z.string()).describe("Task IDs to reopen") },
+  WRITE,
   async (params) => {
-    const results = [];
-    for (const id of params.ids) {
-      results.push(await api.reopenTask(id));
-    }
+    for (const id of params.ids) await api.reopenTask(id);
     return { content: [{ type: "text" as const, text: `Reopened ${params.ids.length} task(s).` }] };
   }
 );
 
 server.tool(
   "update-comments",
-  "Update one or more existing comments.",
-  {
-    comments: z.array(z.object({
-      id: z.string().describe("Comment ID to update"),
-      content: z.string().describe("New comment content"),
-    })).describe("Array of comments to update"),
-  },
+  "Update comment content.",
+  { comments: z.array(z.object({ id: z.string(), content: z.string() })) },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const c of params.comments) {
-      results.push(await api.updateComment(c.id, { content: c.content }));
-    }
+    for (const c of params.comments) results.push(await api.updateComment(c.id, { content: c.content }));
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "update-filters",
-  "Update one or more custom filters.",
-  {
-    filters: z.array(z.object({
-      id: z.string().describe("Filter ID to update"),
-      name: z.string().optional().describe("New filter name"),
-      query: z.string().optional().describe("New filter query"),
-      color: z.string().optional().describe("New filter color"),
-      is_favorite: z.boolean().optional().describe("Favorite status"),
-    })).describe("Array of filters to update"),
-  },
+  "Update filters. Note: Filter management requires the Todoist app.",
+  { filters: z.array(z.object({ id: z.string(), name: z.string().optional(), query: z.string().optional(), color: z.string().optional() })) },
+  WRITE,
   async (params) => {
-    const commands = params.filters.map((f) => ({
-      type: "filter_update",
-      args: {
-        id: f.id,
-        ...(f.name && { name: f.name }),
-        ...(f.query && { query: f.query }),
-        ...(f.color && { color: f.color }),
-        ...(f.is_favorite !== undefined && { is_favorite: f.is_favorite }),
-      },
-    }));
-    const result = await api.syncWriteCommands(commands);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ note: "Filter management not available in API v1. Use the Todoist app.", requested_updates: params.filters }, null, 2),
+      }],
+    };
   }
 );
 
 server.tool(
   "update-projects",
-  "Update one or more projects.",
+  "Update projects.",
   {
     projects: z.array(z.object({
-      id: z.string().describe("Project ID to update"),
-      name: z.string().optional().describe("New project name"),
-      color: z.string().optional().describe("New project color"),
-      is_favorite: z.boolean().optional().describe("Favorite status"),
-      view_style: z.enum(["list", "board"]).optional().describe("View style"),
-    })).describe("Array of projects to update"),
+      id: z.string(), name: z.string().optional(), color: z.string().optional(),
+      is_favorite: z.boolean().optional(), view_style: z.enum(["list", "board"]).optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const p of params.projects) {
-      const { id, ...data } = p;
-      results.push(await api.updateProject(id, data));
-    }
+    for (const p of params.projects) { const { id, ...data } = p; results.push(await api.updateProject(id, data)); }
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "update-reminders",
-  "Update one or more reminders.",
+  "Update reminders.",
   {
     reminders: z.array(z.object({
-      id: z.string().describe("Reminder ID to update"),
-      due: z.object({
-        date: z.string().optional().describe("Due date"),
-        timezone: z.string().optional().describe("Timezone"),
-        string: z.string().optional().describe("Natural language due string"),
-      }).optional().describe("New due specification"),
-      minute_offset: z.number().optional().describe("New minute offset for relative reminders"),
-    })).describe("Array of reminders to update"),
+      id: z.string(),
+      due: z.object({ date: z.string().optional(), timezone: z.string().optional(), string: z.string().optional() }).optional(),
+      minute_offset: z.number().optional(),
+    })),
   },
+  WRITE,
   async (params) => {
-    const commands = params.reminders.map((r) => ({
-      type: "reminder_update",
-      args: r,
-    }));
-    const result = await api.syncWriteCommands(commands);
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    const results = [];
+    for (const r of params.reminders) { const { id, ...data } = r; results.push(await api.updateReminder(id, data)); }
+    return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "update-sections",
-  "Update one or more sections.",
-  {
-    sections: z.array(z.object({
-      id: z.string().describe("Section ID to update"),
-      name: z.string().optional().describe("New section name"),
-    })).describe("Array of sections to update"),
-  },
+  "Update sections.",
+  { sections: z.array(z.object({ id: z.string(), name: z.string().optional() })) },
+  WRITE,
   async (params) => {
     const results = [];
-    for (const s of params.sections) {
-      const { id, ...data } = s;
-      results.push(await api.updateSection(id, data));
-    }
+    for (const s of params.sections) { const { id, ...data } = s; results.push(await api.updateSection(id, data)); }
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
 server.tool(
   "update-tasks",
-  "Update one or more tasks.",
+  "Update tasks. Supports moving between sections/projects.",
   {
     tasks: z.array(z.object({
-      id: z.string().describe("Task ID to update"),
-      content: z.string().optional().describe("New task title"),
-      description: z.string().optional().describe("New description"),
-      labels: z.array(z.string()).optional().describe("New label names"),
-      priority: z.number().optional().describe("New priority (1-4)"),
-      due_string: z.string().optional().describe("Natural language due date"),
-      due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
-      due_datetime: z.string().optional().describe("Due datetime (YYYY-MM-DDTHH:MM:SSZ)"),
-      assignee_id: z.string().optional().describe("User ID to assign to"),
-      section_id: z.string().optional().describe("Move task to this section"),
-      parent_id: z.string().optional().describe("New parent task ID"),
-      order: z.number().optional().describe("Task order"),
-      duration: z.number().optional().describe("Duration amount"),
-      duration_unit: z.enum(["minute", "day"]).optional().describe("Duration unit"),
-    })).describe("Array of tasks to update"),
+      id: z.string(), content: z.string().optional(), description: z.string().optional(),
+      labels: z.array(z.string()).optional(), priority: z.number().optional(),
+      due_string: z.string().optional(), due_date: z.string().optional(), due_datetime: z.string().optional(),
+      assignee_id: z.string().optional(), section_id: z.string().optional(),
+      parent_id: z.string().optional(), project_id: z.string().optional(),
+      order: z.number().optional(), duration: z.number().optional(),
+      duration_unit: z.enum(["minute", "day"]).optional(),
+    })),
   },
+  WRITE,
   async (params) => {
     const results = [];
     for (const t of params.tasks) {
-      const { id, ...data } = t;
-      // section_id and parent_id need the sync API for moving
-      if (data.section_id || data.parent_id !== undefined) {
-        // Use sync API for move operations
-        const moveArgs: Record<string, unknown> = { id };
-        if (data.section_id) moveArgs.section_id = data.section_id;
-        if (data.parent_id !== undefined) moveArgs.parent_id = data.parent_id;
-        await api.syncWriteCommands([{ type: "item_move", args: moveArgs }]);
-
-        // Then update remaining fields via REST if any
-        const restData = { ...data };
-        delete restData.section_id;
-        delete restData.parent_id;
-        if (Object.keys(restData).length > 0) {
-          results.push(await api.updateTask(id, restData as Record<string, unknown>));
-        } else {
-          results.push(await api.getTask(id));
-        }
+      const { id, section_id, parent_id, project_id, ...updateData } = t;
+      if (section_id || parent_id !== undefined || project_id) {
+        const moveData: Record<string, unknown> = {};
+        if (section_id) moveData.section_id = section_id;
+        if (parent_id !== undefined) moveData.parent_id = parent_id;
+        if (project_id) moveData.project_id = project_id;
+        await api.moveTask(id, moveData);
+      }
+      if (Object.keys(updateData).length > 0) {
+        results.push(await api.updateTask(id, updateData as Record<string, unknown>));
       } else {
-        results.push(await api.updateTask(id, data as Record<string, unknown>));
+        results.push(await api.getTask(id));
       }
     }
     return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
   }
 );
 
-// ─── Start server ───
+// ─── Start ───
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-main().catch((err) => {
-  console.error("Server failed to start:", err);
-  process.exit(1);
-});
+main().catch((err) => { console.error("Server failed:", err); process.exit(1); });
