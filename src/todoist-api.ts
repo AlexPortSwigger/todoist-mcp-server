@@ -36,7 +36,7 @@ export class TodoistAPI {
   }
 
   // ─── Helper: unwrap paginated results ───
-  // New API v1 returns { results: [...], next_cursor: ... }
+  // API v1 returns { results: [...], next_cursor: ... }
   // This fetches all pages and returns the flat array.
   private async getAllResults(url: string, params?: Record<string, string>): Promise<unknown[]> {
     const allResults: unknown[] = [];
@@ -143,6 +143,18 @@ export class TodoistAPI {
     return this.getAllResults(`${API_BASE}/projects/${projectId}/collaborators`);
   }
 
+  async archiveProject(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/projects/${id}/archive`, { method: "POST" });
+  }
+
+  async unarchiveProject(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/projects/${id}/unarchive`, { method: "POST" });
+  }
+
+  async searchProjects(query: string): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/projects/search`, { query });
+  }
+
   // ─── Sections ───
 
   async getSections(projectId?: string): Promise<unknown[]> {
@@ -171,6 +183,20 @@ export class TodoistAPI {
 
   async deleteSection(id: string): Promise<unknown> {
     return this.request(`${API_BASE}/sections/${id}`, { method: "DELETE" });
+  }
+
+  async archiveSection(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/sections/${id}/archive`, { method: "POST" });
+  }
+
+  async unarchiveSection(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/sections/${id}/unarchive`, { method: "POST" });
+  }
+
+  async searchSections(query: string, projectId?: string): Promise<unknown[]> {
+    const params: Record<string, string> = { query };
+    if (projectId) params.project_id = projectId;
+    return this.getAllResults(`${API_BASE}/sections/search`, params);
   }
 
   // ─── Comments ───
@@ -231,6 +257,10 @@ export class TodoistAPI {
 
   async getSharedLabels(): Promise<unknown[]> {
     return this.getAllResults(`${API_BASE}/labels/shared`);
+  }
+
+  async searchLabels(query: string): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/labels/search`, { query });
   }
 
   // ─── Reminders ───

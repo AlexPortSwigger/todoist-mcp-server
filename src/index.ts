@@ -864,6 +864,95 @@ server.tool(
   }
 );
 
+// ═══════════════════════════════════════════
+// ADDITIONAL v1 API TOOLS
+// ═══════════════════════════════════════════
+
+server.tool(
+  "archive-project",
+  "Archive a project.",
+  { project_id: z.string().describe("Project ID to archive") },
+  WRITE,
+  async (params) => {
+    const result = await api.archiveProject(params.project_id);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "unarchive-project",
+  "Unarchive a project.",
+  { project_id: z.string().describe("Project ID to unarchive") },
+  WRITE,
+  async (params) => {
+    const result = await api.unarchiveProject(params.project_id);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "search-projects",
+  "Search projects by name.",
+  { query: z.string().describe("Search query") },
+  READ_ONLY,
+  async (params) => {
+    const result = await api.searchProjects(params.query);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "archive-section",
+  "Archive a section.",
+  { section_id: z.string().describe("Section ID to archive") },
+  WRITE,
+  async (params) => {
+    const result = await api.archiveSection(params.section_id);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "unarchive-section",
+  "Unarchive a section.",
+  { section_id: z.string().describe("Section ID to unarchive") },
+  WRITE,
+  async (params) => {
+    const result = await api.unarchiveSection(params.section_id);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "search-sections",
+  "Search sections by name.",
+  {
+    query: z.string().describe("Search query"),
+    project_id: z.string().optional().describe("Filter by project ID"),
+  },
+  READ_ONLY,
+  async (params) => {
+    const result = await api.searchSections(params.query, params.project_id);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool(
+  "search-labels",
+  "Search labels by name.",
+  { query: z.string().describe("Search query") },
+  READ_ONLY,
+  async (params) => {
+    const result = await api.searchLabels(params.query);
+    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+  }
+);
+
+server.tool("find-shared-labels", "List all shared labels.", {}, READ_ONLY, async () => {
+  const result = await api.getSharedLabels();
+  return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+});
+
 // ─── Start ───
 
 async function main() {
