@@ -3,3 +3,4 @@ dist/
 .env
 build-mcpb/
 *.mcpb
+.DS_Store

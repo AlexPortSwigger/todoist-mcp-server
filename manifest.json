@@ -8,6 +8,7 @@
   "author": {
     "name": "Tom Shelton-Lefley"
   },
+  "icon": "icon.png",
   "server": {
     "type": "node",
     "entry_point": "server/dist/index.js",

@@ -22,6 +22,7 @@ bundle: build
     rm -rf {{stage_dir}}
     mkdir -p {{stage_dir}}/server
     cp manifest.json {{stage_dir}}/manifest.json
+    cp icon.png {{stage_dir}}/icon.png
     cp -r dist {{stage_dir}}/server/dist
     cp package.json package-lock.json {{stage_dir}}/server/
     cd {{stage_dir}}/server && npm ci --omit=dev --ignore-scripts
