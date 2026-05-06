@@ -2,7 +2,30 @@
 
 A Model Context Protocol (MCP) server for the Todoist API v1. Provides 44 tools with read-only/write annotations so Claude Desktop groups them correctly.
 
-## Setup
+## Install in Claude Desktop (recommended)
+
+Download or build `todoist-mcp-server.mcpb`, then double-click it (or drag it into Claude Desktop → Settings → Extensions). Claude Desktop will prompt for your **Todoist API Token** during install.
+
+Get your API token from: https://app.todoist.com/app/settings/integrations/developer
+
+### Build the .mcpb from source
+
+```bash
+npm install
+npm run build
+
+mkdir -p build-mcpb/server
+cp manifest.json build-mcpb/manifest.json
+cp -r dist build-mcpb/server/dist
+cp package.json package-lock.json build-mcpb/server/
+(cd build-mcpb/server && npm ci --omit=dev --ignore-scripts)
+npx @anthropic-ai/mcpb pack build-mcpb todoist-mcp-server.mcpb
+rm -rf build-mcpb
+```
+
+## Manual configuration (alternative)
+
+If you'd rather wire up the server directly without packaging:
 
 ```bash
 npm install
@@ -13,10 +36,6 @@ Create a `.env` file:
 ```
 TODOIST_API_TOKEN=your_todoist_api_token_here
 ```
-
-Get your API token from: https://app.todoist.com/app/settings/integrations/developer
-
-## Claude Desktop Configuration
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
