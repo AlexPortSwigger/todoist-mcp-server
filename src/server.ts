@@ -230,10 +230,26 @@ export function createServer(api: TodoistAPI): McpServer {
     }
   );
 
-  server.tool("find-projects", "Find all projects.", {}, READ_ONLY, async () => {
-    const result = await api.getProjects();
-    return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
-  });
+  server.tool(
+    "find-projects",
+    "Find projects. By default returns active projects; set include_archived to include or restrict to archived.",
+    {
+      include_archived: z.union([z.boolean(), z.literal("only")]).optional().describe("true = active + archived, 'only' = archived only"),
+    },
+    READ_ONLY,
+    async (params) => {
+      let result: unknown[];
+      if (params.include_archived === "only") {
+        result = await api.getArchivedProjects();
+      } else if (params.include_archived === true) {
+        const [active, archived] = await Promise.all([api.getProjects(), api.getArchivedProjects()]);
+        result = [...active, ...archived];
+      } else {
+        result = await api.getProjects();
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 
   server.tool("find-reminders", "Find all reminders.", {}, READ_ONLY, async () => {
     const result = mapReminders(await api.getReminders());
@@ -458,12 +474,13 @@ export function createServer(api: TodoistAPI): McpServer {
 
   server.tool(
     "add-comments",
-    "Add comments to tasks or projects.",
+    "Add comments to tasks or projects. Optionally attach a local file via attachment_path (uploaded first).",
     {
       comments: z.array(z.object({
         task_id: z.string().optional().describe("Task ID"),
         project_id: z.string().optional().describe("Project ID"),
         content: z.string().describe("Comment text (Markdown supported)"),
+        attachment_path: z.string().optional().describe("Path to a local file to upload and attach"),
       })).describe("Comments to add"),
     },
     WRITE,
@@ -473,6 +490,9 @@ export function createServer(api: TodoistAPI): McpServer {
         const data: Record<string, unknown> = { content: c.content };
         if (c.task_id) data.task_id = c.task_id;
         if (c.project_id) data.project_id = c.project_id;
+        if (c.attachment_path) {
+          data.file_attachment = await api.uploadFile(c.attachment_path);
+        }
         results.push(await api.createComment(data));
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
@@ -601,7 +621,7 @@ export function createServer(api: TodoistAPI): McpServer {
 
   server.tool(
     "add-tasks",
-    "Create tasks.",
+    "Create tasks. Optional attachment_paths uploads each file and adds it as a comment on the new task.",
     {
       tasks: z.array(z.object({
         content: z.string().describe("Task title"),
@@ -619,17 +639,26 @@ export function createServer(api: TodoistAPI): McpServer {
         assignee_id: z.string().optional(),
         duration: z.number().optional(),
         duration_unit: z.enum(["minute", "day"]).optional(),
+        attachment_paths: z.array(z.string()).optional().describe("Local file paths to upload and attach (one comment per file)"),
       })),
     },
     WRITE,
     async (params) => {
       const results = [];
       for (const t of params.tasks) {
-        const data = { ...(t as Record<string, unknown>) };
+        const { attachment_paths, ...rest } = t;
+        const data = { ...(rest as Record<string, unknown>) };
         if (typeof data.project_id === "string") {
           data.project_id = await resolveProjectId(data.project_id);
         }
-        results.push(mapTask(await api.createTask(data) as Record<string, unknown>));
+        const created = await api.createTask(data) as Record<string, unknown>;
+        if (attachment_paths && attachment_paths.length > 0) {
+          for (const p of attachment_paths) {
+            const fileAttachment = await api.uploadFile(p);
+            await api.createComment({ task_id: created.id, content: "", file_attachment: fileAttachment });
+          }
+        }
+        results.push(mapTask(created));
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }
@@ -700,10 +729,10 @@ export function createServer(api: TodoistAPI): McpServer {
 
   server.tool(
     "delete-object",
-    "Delete a Todoist object.",
+    "Delete a Todoist object. For shared-label, id is the label name.",
     {
-      object_type: z.enum(["task", "project", "section", "comment", "label", "reminder", "filter"]).describe("Object type"),
-      id: z.string().describe("Object ID"),
+      object_type: z.enum(["task", "project", "section", "comment", "label", "reminder", "filter", "shared-label"]).describe("Object type"),
+      id: z.string().describe("Object ID (or label name when object_type is shared-label)"),
     },
     DESTRUCTIVE,
     async (params) => {
@@ -715,6 +744,7 @@ export function createServer(api: TodoistAPI): McpServer {
         case "label": await api.deleteLabel(params.id); break;
         case "reminder": await api.deleteReminder(params.id); break;
         case "filter": await api.deleteFilter(params.id); break;
+        case "shared-label": await api.removeSharedLabel(params.id); break;
       }
       return { content: [{ type: "text" as const, text: `Deleted ${params.object_type} ${params.id}.` }] };
     }
@@ -1081,10 +1111,82 @@ export function createServer(api: TodoistAPI): McpServer {
     }
   );
 
+  server.tool(
+    "create-project-from-template",
+    "Create a project from a CSV template, or import a template into an existing project. Pass project_id+csv_content/csv_path to import; pass name+csv_path to create new.",
+    {
+      project_id: z.string().optional().describe("Existing project ID (import mode)"),
+      name: z.string().optional().describe("New project name (create mode)"),
+      csv_content: z.string().optional().describe("Raw CSV body (only with project_id)"),
+      csv_path: z.string().optional().describe("Local path to a CSV file"),
+    },
+    WRITE,
+    async (params) => {
+      let result: unknown;
+      if (params.project_id && params.csv_content) {
+        result = await api.importTemplateContent(params.project_id, params.csv_content);
+      } else if (params.project_id && params.csv_path) {
+        result = await api.importTemplateFromFile(params.project_id, params.csv_path);
+      } else if (params.name && params.csv_path) {
+        result = await api.createProjectFromFile(params.name, params.csv_path);
+      } else {
+        throw new Error("Provide project_id+csv_content, project_id+csv_path, or name+csv_path");
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "export-project-as-template",
+    "Export a project's structure as a template (CSV by default, optional JSON).",
+    {
+      project_id: z.string().describe("Project to export"),
+      format: z.enum(["csv", "json"]).optional().describe("Export format (default csv)"),
+    },
+    READ_ONLY,
+    async (params) => {
+      const result = await api.exportTemplate(params.project_id, params.format);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "manage-email-forwarding",
+    "Get-or-create or disable email-to-task forwarding for a project, project notes, or task. Use it to obtain an email address that creates tasks/comments when sent mail.",
+    {
+      action: z.enum(["get_or_create", "disable"]).describe("get_or_create returns the address; disable revokes it"),
+      target: z.enum(["project", "project_notes", "task"]).describe("Object kind"),
+      id: z.string().describe("Project or task ID"),
+    },
+    WRITE,
+    async (params) => {
+      if (params.action === "get_or_create") {
+        const result = await api.getOrCreateEmail(params.target, params.id);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      }
+      await api.disableEmail(params.target, params.id);
+      return { content: [{ type: "text" as const, text: `Disabled email forwarding for ${params.target} ${params.id}.` }] };
+    }
+  );
+
   server.tool("find-shared-labels", "List all shared labels.", {}, READ_ONLY, async () => {
     const result = await api.getSharedLabels();
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   });
+
+  server.tool(
+    "rename-shared-label",
+    "Rename a shared label across every task that uses it.",
+    {
+      name: z.string().describe("Existing shared label name"),
+      new_name: z.string().describe("New name"),
+    },
+    WRITE,
+    async (params) => {
+      await api.renameSharedLabel(params.name, params.new_name);
+      return { content: [{ type: "text" as const, text: `Renamed shared label "${params.name}" to "${params.new_name}".` }] };
+    }
+  );
 
   return server;
 }

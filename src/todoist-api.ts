@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+
 const API_BASE = "https://api.todoist.com/api/v1";
 const RETRY_STATUSES = new Set([502, 503, 504]);
 
@@ -187,6 +190,10 @@ export class TodoistAPI {
     return this.request(`${API_BASE}/projects/${id}/unarchive`, { method: "POST" });
   }
 
+  async getArchivedProjects(): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/projects/archived`);
+  }
+
   async joinProject(id: string): Promise<unknown> {
     return this.request(`${API_BASE}/projects/${id}/join`, { method: "POST" });
   }
@@ -299,6 +306,20 @@ export class TodoistAPI {
     return this.getAllResults(`${API_BASE}/labels/shared`);
   }
 
+  async renameSharedLabel(name: string, newName: string): Promise<unknown> {
+    return this.request(`${API_BASE}/labels/shared/rename`, {
+      method: "POST",
+      body: JSON.stringify({ name, new_name: newName }),
+    });
+  }
+
+  async removeSharedLabel(name: string): Promise<unknown> {
+    return this.request(`${API_BASE}/labels/shared/remove`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  }
+
   async searchLabels(query: string): Promise<unknown[]> {
     return this.getAllResults(`${API_BASE}/labels/search`, { query });
   }
@@ -375,6 +396,75 @@ export class TodoistAPI {
 
   async getUserInfo(): Promise<unknown> {
     return this.request(`${API_BASE}/user`);
+  }
+
+  // ─── Templates ───
+
+  async importTemplateContent(projectId: string, csvContent: string): Promise<unknown> {
+    return this.request(`${API_BASE}/templates/import_into_project/${projectId}`, {
+      method: "POST",
+      body: JSON.stringify({ file: csvContent }),
+    });
+  }
+
+  async importTemplateFromFile(projectId: string, filePath: string): Promise<unknown> {
+    const buffer = await readFile(filePath);
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(buffer)]), basename(filePath));
+    const qs = new URLSearchParams({ project_id: projectId }).toString();
+    return this.request(`${API_BASE}/templates/import_into_project_from_file?${qs}`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async createProjectFromFile(name: string, filePath: string): Promise<unknown> {
+    const buffer = await readFile(filePath);
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(buffer)]), basename(filePath));
+    const qs = new URLSearchParams({ name }).toString();
+    return this.request(`${API_BASE}/templates/create_project_from_file?${qs}`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async exportTemplate(projectId: string, format?: string): Promise<unknown> {
+    const params: Record<string, string> = { project_id: projectId };
+    if (format) params.format = format;
+    const qs = new URLSearchParams(params).toString();
+    return this.request(`${API_BASE}/templates/export?${qs}`);
+  }
+
+  // ─── Uploads ───
+
+  async uploadFile(filePath: string): Promise<unknown> {
+    const buffer = await readFile(filePath);
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(buffer)]), basename(filePath));
+    return this.request(`${API_BASE}/uploads`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async deleteUpload(fileUrl: string): Promise<unknown> {
+    const qs = new URLSearchParams({ file_url: fileUrl }).toString();
+    return this.request(`${API_BASE}/uploads?${qs}`, { method: "DELETE" });
+  }
+
+  // ─── Email-to-task ───
+
+  async getOrCreateEmail(objType: string, objId: string): Promise<unknown> {
+    return this.request(`${API_BASE}/emails`, {
+      method: "PUT",
+      body: JSON.stringify({ obj_type: objType, obj_id: objId }),
+    });
+  }
+
+  async disableEmail(objType: string, objId: string): Promise<unknown> {
+    const qs = new URLSearchParams({ obj_type: objType, obj_id: objId }).toString();
+    return this.request(`${API_BASE}/emails?${qs}`, { method: "DELETE" });
   }
 
   // ─── Sync ───

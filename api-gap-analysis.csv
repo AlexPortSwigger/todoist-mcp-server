@@ -23,7 +23,7 @@ Projects,POST,/projects/{id}/join,Join shared/workspace project,yes,yes,project-
 Projects,GET,/projects/{id}/collaborators,List collaborators,yes,yes,find-project-collaborators
 Projects,GET,/projects/{id}/permissions,Current user's permissions,unknown,no,(not exposed; reachable via generic fetch tool)
 Projects,GET,/projects/search,Search projects,yes,yes,search-projects
-Projects,GET,/projects/archived,List archived projects,unknown,no,(not exposed)
+Projects,GET,/projects/archived,List archived projects,unknown,yes,find-projects (include_archived: true | 'only')
 Sections,GET,/sections,List sections,yes,yes,find-sections
 Sections,POST,/sections,Create section,yes,yes,add-sections
 Sections,GET,/sections/{id},Get section,yes,yes,fetch-object
@@ -44,8 +44,8 @@ Labels,POST,/labels/{id},Update label,yes,yes,update-labels
 Labels,DELETE,/labels/{id},Delete label,yes,yes,delete-object
 Labels,GET,/labels/search,Search labels,yes,yes,search-labels
 Labels,GET,/labels/shared,List shared labels,yes,yes,find-shared-labels
-Labels,POST,/labels/shared/rename,Rename shared label,unknown,no,(not exposed)
-Labels,POST,/labels/shared/remove,Remove shared label,unknown,no,(not exposed)
+Labels,POST,/labels/shared/rename,Rename shared label,unknown,yes,rename-shared-label
+Labels,POST,/labels/shared/remove,Remove shared label,unknown,yes,delete-object (object_type=shared-label)
 Reminders,GET,/reminders,List time-based reminders,yes,yes,find-reminders
 Reminders,POST,/reminders,Create reminder,yes,yes,add-reminders
 Reminders,GET,/reminders/{id},Get reminder,yes,yes,fetch-object
@@ -89,14 +89,14 @@ Workspaces,PUT,/workspaces/{id}/invitations/{email}/reject,Reject invitation,unk
 Workspaces,DELETE,/workspaces/{id}/invitations/{email},Delete invitation,unknown,no,(not exposed)
 Workspaces,GET,/workspaces/{id}/plan,Plan details,unknown,no,(not exposed)
 Activity,GET,/activity/logs,Activity log events,yes,yes,find-activity
-Templates,POST,/templates/import_into_project/{id},Import template into project,unknown,no,(not exposed)
-Templates,POST,/templates/import_into_project_from_file,Import template from CSV,unknown,no,(not exposed)
-Templates,POST,/templates/create_project_from_file,Create project from CSV,unknown,no,(not exposed)
-Templates,GET,/templates/export,Export project as template,unknown,no,(not exposed)
+Templates,POST,/templates/import_into_project/{id},Import template into project,unknown,yes,create-project-from-template (project_id + csv_content)
+Templates,POST,/templates/import_into_project_from_file,Import template from CSV,unknown,yes,create-project-from-template (project_id + csv_path)
+Templates,POST,/templates/create_project_from_file,Create project from CSV,unknown,yes,create-project-from-template (name + csv_path)
+Templates,GET,/templates/export,Export project as template,unknown,yes,export-project-as-template
 Backups,GET,/backups,List backups,unknown,no,(not exposed)
 Backups,GET,/backups/download,Download backup ZIP,unknown,no,(not exposed)
-Uploads,POST,/uploads,Upload file attachment,unknown,no,(not exposed)
-Uploads,DELETE,/uploads/{id},Delete upload,unknown,no,(not exposed)
+Uploads,POST,/uploads,Upload file attachment,unknown,yes,used internally by add-comments (attachment_path) and add-tasks (attachment_paths)
+Uploads,DELETE,/uploads/{id},Delete upload,unknown,no,(not exposed; deletion of upload tied to comment/task deletion)
 Sync,POST,/sync,Batch read/write commands,yes,yes,used internally by reschedule-tasks (item_update preserves recurrence)
 OAuth,POST,/oauth/authorize,Authorization request,no,no,(out of scope for personal-token MCP)
 OAuth,POST,/oauth/access_token,Exchange code for token,no,no,(out of scope)
@@ -111,5 +111,5 @@ Other,POST,/folders,Create folder,unknown,no,(not exposed)
 Other,GET,/folders/{id},Get folder,unknown,no,(not exposed)
 Other,POST,/folders/{id},Update folder,unknown,no,(not exposed)
 Other,DELETE,/folders/{id},Delete folder,unknown,no,(not exposed)
-Other,PUT,/emails,Get-or-create email-to-task address,unknown,no,(not exposed)
-Other,DELETE,/emails/{id},Disable email-to-task,unknown,no,(not exposed)
+Other,PUT,/emails,Get-or-create email-to-task address,unknown,yes,manage-email-forwarding (action=get_or_create)
+Other,DELETE,/emails/{id},Disable email-to-task,unknown,yes,manage-email-forwarding (action=disable)
