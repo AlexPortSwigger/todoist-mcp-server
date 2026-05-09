@@ -29,7 +29,7 @@ test("find-tasks with filter_query hits /tasks/filter with query param", async (
     ]);
     const api = new TodoistAPI("t");
     const server = createServer(api);
-    const result = await callTool(server, "find-tasks", { filter_query: "today & p1" });
+    const result = await callTool(server, "find-tasks", { filter_query: "today & p1", responsible_user: "all" });
     assert.equal(fetchMock.calls.length, 1);
     const url = fetchMock.calls[0].url;
     assert.match(url, /\/tasks\/filter\?/);

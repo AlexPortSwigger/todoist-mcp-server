@@ -1,10 +1,36 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { TodoistAPI } from "./todoist-api.js";
+import { mapTask, mapTasks, mapReminder, mapReminders } from "./mappers.js";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false } as const;
 const WRITE = { readOnlyHint: false, destructiveHint: false } as const;
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true } as const;
+
+function buildDateFilterQuery(p: {
+  due_date?: string;
+  due_before?: string;
+  due_after?: string;
+  overdue_mode?: "include" | "exclude" | "only";
+}): string {
+  if (p.due_date) return `due: ${p.due_date}`;
+  if (p.due_after && p.due_before) return `(due after: ${p.due_after} | due: ${p.due_after}) & due before: ${p.due_before}`;
+  if (p.due_after) return `due after: ${p.due_after} | due: ${p.due_after}`;
+  if (p.due_before) return `due before: ${p.due_before}`;
+  // No date params: default behavior
+  if (p.overdue_mode === "only") return "overdue";
+  if (p.overdue_mode === "exclude") return "today";
+  return "today | overdue";
+}
+
+type ResponsibleUser = "unassignedOrMe" | "me" | "all";
+
+function wrapResponsibleUser(query: string, mode: ResponsibleUser): string {
+  if (mode === "all") return query;
+  const wrapper = mode === "me" ? "assigned to: me" : "(no assignee | assigned to: me)";
+  return `${wrapper} & (${query})`;
+}
 
 export function createServer(api: TodoistAPI): McpServer {
   const server = new McpServer({
@@ -12,36 +38,41 @@ export function createServer(api: TodoistAPI): McpServer {
     version: "1.0.0",
   });
 
+  let cachedInboxId: string | null = null;
+  async function resolveProjectId(id: string | undefined): Promise<string | undefined> {
+    if (id !== "inbox") return id;
+    if (!cachedInboxId) {
+      const user = await api.getUserInfo() as Record<string, unknown>;
+      cachedInboxId = String(user.inbox_project_id);
+    }
+    return cachedInboxId;
+  }
+
   // ═══════════════════════════════════════════
   // INTERACTIVE TOOLS (1)
   // ═══════════════════════════════════════════
 
   server.tool(
     "find-tasks-by-date",
-    "Find tasks filtered by due date range.",
+    "Find tasks by due date using Todoist's filter DSL via /tasks/filter. With no date params, defaults to 'today | overdue'. Applies unassignedOrMe wrapper by default.",
     {
       due_date: z.string().optional().describe("Specific due date (YYYY-MM-DD)"),
-      due_before: z.string().optional().describe("Tasks due before this date (YYYY-MM-DD)"),
-      due_after: z.string().optional().describe("Tasks due after this date (YYYY-MM-DD)"),
-      project_id: z.string().optional().describe("Filter by project ID"),
+      due_before: z.string().optional().describe("Tasks due strictly before this date (YYYY-MM-DD)"),
+      due_after: z.string().optional().describe("Tasks due on or after this date (YYYY-MM-DD)"),
+      overdue_mode: z.enum(["include", "exclude", "only"]).optional().describe("How to treat overdue tasks when no date params given (default: include)"),
+      project_id: z.string().optional().describe("Filter by project ID (applied client-side after fetching)"),
+      responsible_user: z.enum(["unassignedOrMe", "me", "all"]).optional().describe("Default unassignedOrMe. Use 'all' to disable."),
     },
     READ_ONLY,
     async (params) => {
-      const allTasks = await api.getTasks(
-        params.project_id ? { project_id: params.project_id } : undefined
-      );
-      const todayStr = new Date().toISOString().split("T")[0];
-      const filtered = allTasks.filter((task) => {
-        const t = task as Record<string, unknown>;
-        const due = t.due as Record<string, string> | null;
-        if (!due?.date) return false;
-        if (params.due_date && due.date !== params.due_date) return false;
-        if (params.due_before && due.date >= params.due_before) return false;
-        if (params.due_after && due.date <= params.due_after) return false;
-        if (!params.due_date && !params.due_before && !params.due_after) return due.date <= todayStr;
-        return true;
-      });
-      return { content: [{ type: "text" as const, text: JSON.stringify(filtered, null, 2) }] };
+      const responsible: ResponsibleUser = params.responsible_user ?? "unassignedOrMe";
+      const inner = buildDateFilterQuery(params);
+      const query = wrapResponsibleUser(inner, responsible);
+      let tasks = await api.getTasksByFilter(query);
+      if (params.project_id) {
+        tasks = tasks.filter((t) => String((t as Record<string, unknown>).project_id) === params.project_id);
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(mapTasks(tasks), null, 2) }] };
     }
   );
 
@@ -75,12 +106,12 @@ export function createServer(api: TodoistAPI): McpServer {
     async (params) => {
       let result: unknown;
       switch (params.object_type) {
-        case "task": result = await api.getTask(params.id); break;
+        case "task": result = mapTask((await api.getTask(params.id)) as Record<string, unknown>); break;
         case "project": result = await api.getProject(params.id); break;
         case "section": result = await api.getSection(params.id); break;
         case "comment": result = await api.getComment(params.id); break;
         case "label": result = await api.getLabel(params.id); break;
-        case "reminder": result = await api.getReminder(params.id); break;
+        case "reminder": result = mapReminder((await api.getReminder(params.id)) as Record<string, unknown>); break;
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     }
@@ -156,9 +187,18 @@ export function createServer(api: TodoistAPI): McpServer {
       if (params.limit) qs.limit = String(params.limit);
       if (params.offset) qs.offset = String(params.offset);
       let result: unknown;
-      if (params.by === "completion_date") result = await api.getCompletedByCompletionDate(qs);
-      else if (params.by === "due_date") result = await api.getCompletedByDueDate(qs);
-      else result = await api.getCompletedTasks(qs);
+      if (params.by === "completion_date") {
+        result = mapTasks(await api.getCompletedByCompletionDate(qs));
+      } else if (params.by === "due_date") {
+        result = mapTasks(await api.getCompletedByDueDate(qs));
+      } else {
+        const raw = await api.getCompletedTasks(qs) as Record<string, unknown>;
+        if (raw && Array.isArray(raw.items)) {
+          result = { ...raw, items: mapTasks(raw.items as unknown[]) };
+        } else {
+          result = raw;
+        }
+      }
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -196,7 +236,7 @@ export function createServer(api: TodoistAPI): McpServer {
   });
 
   server.tool("find-reminders", "Find all reminders.", {}, READ_ONLY, async () => {
-    const result = await api.getReminders();
+    const result = mapReminders(await api.getReminders());
     return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -213,7 +253,7 @@ export function createServer(api: TodoistAPI): McpServer {
 
   server.tool(
     "find-tasks",
-    "Find active tasks with optional filtering. Pass filter_query to use Todoist's filter DSL via /tasks/filter.",
+    "Find active tasks. Routes to /tasks/filter when label/filter_query is given (with default unassignedOrMe wrapper); /tasks otherwise.",
     {
       project_id: z.string().optional().describe("Filter by project ID"),
       section_id: z.string().optional().describe("Filter by section ID"),
@@ -222,24 +262,32 @@ export function createServer(api: TodoistAPI): McpServer {
       parent_id: z.string().optional().describe("Filter by parent task ID"),
       filter_query: z.string().optional().describe("Todoist filter DSL query, e.g. 'today & p1', 'overdue', 'search: foo'"),
       lang: z.string().optional().describe("Language for filter_query natural-language dates (e.g. 'en', 'fr')"),
+      responsible_user: z.enum(["unassignedOrMe", "me", "all"]).optional().describe("Default unassignedOrMe — narrows to tasks the user can act on. Use 'all' to disable."),
     },
     READ_ONLY,
     async (params) => {
+      const responsible: ResponsibleUser = params.responsible_user ?? "unassignedOrMe";
       let tasks: unknown[];
-      if (params.filter_query) {
-        tasks = await api.getTasksByFilter(params.filter_query, params.lang);
+
+      if (params.filter_query || params.label) {
+        const fragments: string[] = [];
+        if (params.filter_query) fragments.push(params.filter_query);
+        if (params.label) fragments.push(`@${params.label}`);
+        const inner = fragments.length === 1 ? fragments[0] : fragments.map((f) => `(${f})`).join(" & ");
+        const query = wrapResponsibleUser(inner, responsible);
+        tasks = await api.getTasksByFilter(query, params.lang);
       } else {
         const qp: Record<string, string> = {};
-        if (params.project_id) qp.project_id = params.project_id;
+        const projectId = await resolveProjectId(params.project_id);
+        if (projectId) qp.project_id = projectId;
         if (params.section_id) qp.section_id = params.section_id;
         tasks = await api.getTasks(Object.keys(qp).length > 0 ? qp : undefined);
       }
 
-      if (params.label) tasks = tasks.filter((t) => ((t as Record<string, unknown>).labels as string[] || []).includes(params.label!));
       if (params.ids) { const s = new Set(params.ids); tasks = tasks.filter((t) => s.has(String((t as Record<string, unknown>).id))); }
       if (params.parent_id) tasks = tasks.filter((t) => String((t as Record<string, unknown>).parent_id) === params.parent_id);
 
-      return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
+      return { content: [{ type: "text" as const, text: JSON.stringify(mapTasks(tasks), null, 2) }] };
     }
   );
 
@@ -268,7 +316,8 @@ export function createServer(api: TodoistAPI): McpServer {
           total_projects: projects.length, total_active_tasks: tasks.length, total_labels: labels.length,
           overdue_count: overdueTasks.length, today_count: todayTasks.length,
           tasks_by_project: tasksByProject,
-          overdue_tasks: overdueTasks.slice(0, 10), today_tasks: todayTasks.slice(0, 10),
+          overdue_tasks: mapTasks(overdueTasks.slice(0, 10)),
+          today_tasks: mapTasks(todayTasks.slice(0, 10)),
         }, null, 2),
       }],
     };
@@ -377,7 +426,7 @@ export function createServer(api: TodoistAPI): McpServer {
           || String(t.description || "").toLowerCase().includes(q)
           || (t.labels as string[] || []).join(" ").toLowerCase().includes(q);
       });
-      return { content: [{ type: "text" as const, text: JSON.stringify(matches, null, 2) }] };
+      return { content: [{ type: "text" as const, text: JSON.stringify(mapTasks(matches), null, 2) }] };
     }
   );
 
@@ -507,7 +556,7 @@ export function createServer(api: TodoistAPI): McpServer {
     WRITE,
     async (params) => {
       const results = [];
-      for (const r of params.reminders) results.push(await api.createReminder(r));
+      for (const r of params.reminders) results.push(mapReminder(await api.createReminder(r) as Record<string, unknown>));
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -545,7 +594,7 @@ export function createServer(api: TodoistAPI): McpServer {
       if (params.note !== undefined) data.note = params.note;
       if (params.reminder !== undefined) data.reminder = params.reminder;
       if (params.auto_reminder !== undefined) data.auto_reminder = params.auto_reminder;
-      const result = await api.quickAddTask(data);
+      const result = mapTask(await api.quickAddTask(data) as Record<string, unknown>);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -575,7 +624,13 @@ export function createServer(api: TodoistAPI): McpServer {
     WRITE,
     async (params) => {
       const results = [];
-      for (const t of params.tasks) results.push(await api.createTask(t as Record<string, unknown>));
+      for (const t of params.tasks) {
+        const data = { ...(t as Record<string, unknown>) };
+        if (typeof data.project_id === "string") {
+          data.project_id = await resolveProjectId(data.project_id);
+        }
+        results.push(mapTask(await api.createTask(data) as Record<string, unknown>));
+      }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -677,7 +732,10 @@ export function createServer(api: TodoistAPI): McpServer {
     WRITE,
     async (params) => {
       const results = [];
-      for (const a of params.assignments) results.push(await api.updateTask(a.task_id, { assignee_id: a.assignee_id }));
+      for (const a of params.assignments) {
+        const raw = await api.updateTask(a.task_id, { assignee_id: a.assignee_id });
+        results.push(mapTask(raw as Record<string, unknown>));
+      }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -739,7 +797,11 @@ export function createServer(api: TodoistAPI): McpServer {
       const results = [];
       for (const item of params.items) {
         switch (params.object_type) {
-          case "task": results.push(await api.updateTask(item.id, { child_order: item.child_order })); break;
+          case "task": {
+            const raw = await api.updateTask(item.id, { child_order: item.child_order });
+            results.push(mapTask(raw as Record<string, unknown>));
+            break;
+          }
           case "project": results.push(await api.updateProject(item.id, { child_order: item.child_order })); break;
           case "section": results.push(await api.updateSection(item.id, { order: item.child_order })); break;
         }
@@ -750,25 +812,29 @@ export function createServer(api: TodoistAPI): McpServer {
 
   server.tool(
     "reschedule-tasks",
-    "Reschedule tasks with new due dates.",
+    "Reschedule tasks. Uses Sync item_update so recurring tasks keep their recurrence rule.",
     {
       tasks: z.array(z.object({
         id: z.string().describe("Task ID"),
         due_string: z.string().optional(),
         due_date: z.string().optional(),
         due_datetime: z.string().optional(),
+        due_lang: z.string().optional(),
       })),
     },
     WRITE,
     async (params) => {
-      const results = [];
-      for (const t of params.tasks) {
-        const data: Record<string, unknown> = {};
-        if (t.due_string) data.due_string = t.due_string;
-        if (t.due_date) data.due_date = t.due_date;
-        if (t.due_datetime) data.due_datetime = t.due_datetime;
-        results.push(await api.updateTask(t.id, data));
-      }
+      const commands = params.tasks.map((t) => {
+        const due: Record<string, unknown> = {};
+        if (t.due_string !== undefined) due.string = t.due_string;
+        if (t.due_date !== undefined) due.date = t.due_date;
+        if (t.due_datetime !== undefined) due.datetime = t.due_datetime;
+        if (t.due_lang !== undefined) due.lang = t.due_lang;
+        return { type: "item_update", uuid: randomUUID(), args: { id: t.id, due } };
+      });
+      await api.sync(commands);
+      const raws = await Promise.all(params.tasks.map((t) => api.getTask(t.id)));
+      const results = raws.map((r) => mapTask(r as Record<string, unknown>));
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -873,7 +939,10 @@ export function createServer(api: TodoistAPI): McpServer {
     WRITE,
     async (params) => {
       const results = [];
-      for (const r of params.reminders) { const { id, ...data } = r; results.push(await api.updateReminder(id, data)); }
+      for (const r of params.reminders) {
+        const { id, ...data } = r;
+        results.push(mapReminder(await api.updateReminder(id, data) as Record<string, unknown>));
+      }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -916,11 +985,13 @@ export function createServer(api: TodoistAPI): McpServer {
           if (project_id) moveData.project_id = project_id;
           await api.moveTask(id, moveData);
         }
+        let raw: unknown;
         if (Object.keys(updateData).length > 0) {
-          results.push(await api.updateTask(id, updateData as Record<string, unknown>));
+          raw = await api.updateTask(id, updateData as Record<string, unknown>);
         } else {
-          results.push(await api.getTask(id));
+          raw = await api.getTask(id);
         }
+        results.push(mapTask(raw as Record<string, unknown>));
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     }

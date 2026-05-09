@@ -1,10 +1,17 @@
 const API_BASE = "https://api.todoist.com/api/v1";
+const RETRY_STATUSES = new Set([502, 503, 504]);
+
+export interface TodoistAPIOptions {
+  retryDelaysMs?: number[];
+}
 
 export class TodoistAPI {
   private token: string;
+  private retryDelaysMs: number[];
 
-  constructor(token: string) {
+  constructor(token: string, options: TodoistAPIOptions = {}) {
     this.token = token;
+    this.retryDelaysMs = options.retryDelaysMs ?? [500, 2000];
   }
 
   private async request(
@@ -19,7 +26,15 @@ export class TodoistAPI {
       headers["Content-Type"] = "application/json";
     }
 
-    const res = await fetch(url, { ...options, headers });
+    let res: Response | undefined;
+    let attempt = 0;
+    while (true) {
+      res = await fetch(url, { ...options, headers });
+      if (!RETRY_STATUSES.has(res.status) || attempt >= this.retryDelaysMs.length) break;
+      const delay = this.retryDelaysMs[attempt];
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, delay));
+    }
 
     if (res.status === 204) return { success: true };
 
@@ -360,6 +375,15 @@ export class TodoistAPI {
 
   async getUserInfo(): Promise<unknown> {
     return this.request(`${API_BASE}/user`);
+  }
+
+  // ─── Sync ───
+
+  async sync(commands: Array<{ type: string; uuid: string; args: Record<string, unknown> }>): Promise<unknown> {
+    return this.request(`${API_BASE}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ commands }),
+    });
   }
 
   // ─── Generic fetch ───
