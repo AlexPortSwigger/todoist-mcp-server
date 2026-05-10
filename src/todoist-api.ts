@@ -1,10 +1,20 @@
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+
 const API_BASE = "https://api.todoist.com/api/v1";
+const RETRY_STATUSES = new Set([502, 503, 504]);
+
+export interface TodoistAPIOptions {
+  retryDelaysMs?: number[];
+}
 
 export class TodoistAPI {
   private token: string;
+  private retryDelaysMs: number[];
 
-  constructor(token: string) {
+  constructor(token: string, options: TodoistAPIOptions = {}) {
     this.token = token;
+    this.retryDelaysMs = options.retryDelaysMs ?? [500, 2000];
   }
 
   private async request(
@@ -19,7 +29,15 @@ export class TodoistAPI {
       headers["Content-Type"] = "application/json";
     }
 
-    const res = await fetch(url, { ...options, headers });
+    let res: Response | undefined;
+    let attempt = 0;
+    while (true) {
+      res = await fetch(url, { ...options, headers });
+      if (!RETRY_STATUSES.has(res.status) || attempt >= this.retryDelaysMs.length) break;
+      const delay = this.retryDelaysMs[attempt];
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, delay));
+    }
 
     if (res.status === 204) return { success: true };
 
@@ -65,6 +83,12 @@ export class TodoistAPI {
     return this.getAllResults(`${API_BASE}/tasks`, params);
   }
 
+  async getTasksByFilter(query: string, lang?: string): Promise<unknown[]> {
+    const params: Record<string, string> = { query };
+    if (lang) params.lang = lang;
+    return this.getAllResults(`${API_BASE}/tasks/filter`, params);
+  }
+
   async getTask(id: string): Promise<unknown> {
     return this.request(`${API_BASE}/tasks/${id}`);
   }
@@ -107,8 +131,23 @@ export class TodoistAPI {
     return this.request(`${API_BASE}/tasks/completed${qs}`);
   }
 
-  async getCompletedStats(): Promise<unknown> {
-    return this.request(`${API_BASE}/tasks/completed/stats`);
+  async getCompletedByCompletionDate(params: Record<string, string>): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/tasks/completed/by_completion_date`, params);
+  }
+
+  async getCompletedByDueDate(params: Record<string, string>): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/tasks/completed/by_due_date`, params);
+  }
+
+  async quickAddTask(data: Record<string, unknown>): Promise<unknown> {
+    return this.request(`${API_BASE}/tasks/quick_add`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getProductivityStats(): Promise<unknown> {
+    return this.request(`${API_BASE}/user/productivity_stats`);
   }
 
   // ─── Projects ───
@@ -149,6 +188,14 @@ export class TodoistAPI {
 
   async unarchiveProject(id: string): Promise<unknown> {
     return this.request(`${API_BASE}/projects/${id}/unarchive`, { method: "POST" });
+  }
+
+  async getArchivedProjects(): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/projects/archived`);
+  }
+
+  async joinProject(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/projects/${id}/join`, { method: "POST" });
   }
 
   async searchProjects(query: string): Promise<unknown[]> {
@@ -259,6 +306,20 @@ export class TodoistAPI {
     return this.getAllResults(`${API_BASE}/labels/shared`);
   }
 
+  async renameSharedLabel(name: string, newName: string): Promise<unknown> {
+    return this.request(`${API_BASE}/labels/shared/rename`, {
+      method: "POST",
+      body: JSON.stringify({ name, new_name: newName }),
+    });
+  }
+
+  async removeSharedLabel(name: string): Promise<unknown> {
+    return this.request(`${API_BASE}/labels/shared/remove`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  }
+
   async searchLabels(query: string): Promise<unknown[]> {
     return this.getAllResults(`${API_BASE}/labels/search`, { query });
   }
@@ -291,10 +352,128 @@ export class TodoistAPI {
     return this.request(`${API_BASE}/reminders/${id}`, { method: "DELETE" });
   }
 
+  // ─── Filters ───
+
+  async getFilters(): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/filters`);
+  }
+
+  async getFilter(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/filters/${id}`);
+  }
+
+  async createFilter(data: Record<string, unknown>): Promise<unknown> {
+    return this.request(`${API_BASE}/filters`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateFilter(id: string, data: Record<string, unknown>): Promise<unknown> {
+    return this.request(`${API_BASE}/filters/${id}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteFilter(id: string): Promise<unknown> {
+    return this.request(`${API_BASE}/filters/${id}`, { method: "DELETE" });
+  }
+
+  // ─── Activity ───
+
+  async getActivityLogs(params?: Record<string, string>): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/activity/logs`, params);
+  }
+
+  // ─── Workspaces ───
+
+  async getWorkspaces(): Promise<unknown[]> {
+    return this.getAllResults(`${API_BASE}/workspaces`);
+  }
+
   // ─── User ───
 
   async getUserInfo(): Promise<unknown> {
     return this.request(`${API_BASE}/user`);
+  }
+
+  // ─── Templates ───
+
+  async importTemplateContent(projectId: string, csvContent: string): Promise<unknown> {
+    return this.request(`${API_BASE}/templates/import_into_project/${projectId}`, {
+      method: "POST",
+      body: JSON.stringify({ file: csvContent }),
+    });
+  }
+
+  async importTemplateFromFile(projectId: string, filePath: string): Promise<unknown> {
+    const buffer = await readFile(filePath);
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(buffer)]), basename(filePath));
+    const qs = new URLSearchParams({ project_id: projectId }).toString();
+    return this.request(`${API_BASE}/templates/import_into_project_from_file?${qs}`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async createProjectFromFile(name: string, filePath: string): Promise<unknown> {
+    const buffer = await readFile(filePath);
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(buffer)]), basename(filePath));
+    const qs = new URLSearchParams({ name }).toString();
+    return this.request(`${API_BASE}/templates/create_project_from_file?${qs}`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async exportTemplate(projectId: string, format?: string): Promise<unknown> {
+    const params: Record<string, string> = { project_id: projectId };
+    if (format) params.format = format;
+    const qs = new URLSearchParams(params).toString();
+    return this.request(`${API_BASE}/templates/export?${qs}`);
+  }
+
+  // ─── Uploads ───
+
+  async uploadFile(filePath: string): Promise<unknown> {
+    const buffer = await readFile(filePath);
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(buffer)]), basename(filePath));
+    return this.request(`${API_BASE}/uploads`, {
+      method: "POST",
+      body: formData,
+    });
+  }
+
+  async deleteUpload(fileUrl: string): Promise<unknown> {
+    const qs = new URLSearchParams({ file_url: fileUrl }).toString();
+    return this.request(`${API_BASE}/uploads?${qs}`, { method: "DELETE" });
+  }
+
+  // ─── Email-to-task ───
+
+  async getOrCreateEmail(objType: string, objId: string): Promise<unknown> {
+    return this.request(`${API_BASE}/emails`, {
+      method: "PUT",
+      body: JSON.stringify({ obj_type: objType, obj_id: objId }),
+    });
+  }
+
+  async disableEmail(objType: string, objId: string): Promise<unknown> {
+    const qs = new URLSearchParams({ obj_type: objType, obj_id: objId }).toString();
+    return this.request(`${API_BASE}/emails?${qs}`, { method: "DELETE" });
+  }
+
+  // ─── Sync ───
+
+  async sync(commands: Array<{ type: string; uuid: string; args: Record<string, unknown> }>): Promise<unknown> {
+    return this.request(`${API_BASE}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ commands }),
+    });
   }
 
   // ─── Generic fetch ───

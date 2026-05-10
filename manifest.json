@@ -1,0 +1,40 @@
+{
+  "manifest_version": "0.2",
+  "name": "todoist-mcp-server",
+  "display_name": "Todoist",
+  "version": "1.0.0",
+  "description": "MCP server for the Todoist API v1 with 44 tools (tasks, projects, sections, comments, labels, search, archive).",
+  "long_description": "Provides full feature parity with the official Todoist connector. Includes read-only/write/destructive tool annotations so Claude Desktop groups them correctly.",
+  "author": {
+    "name": "Tom Shelton-Lefley"
+  },
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/dist/index.js"],
+      "env": {
+        "TODOIST_API_TOKEN": "${user_config.todoist_api_token}"
+      }
+    }
+  },
+  "user_config": {
+    "todoist_api_token": {
+      "type": "string",
+      "title": "Todoist API Token",
+      "description": "Get your token from https://app.todoist.com/app/settings/integrations/developer",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "tools_generated": true,
+  "keywords": ["todoist", "tasks", "productivity"],
+  "license": "MIT",
+  "compatibility": {
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
