@@ -1,5 +1,5 @@
 {
-  "name": "todoist-mcp-server",
+  "name": "todoist-custom",
   "version": "1.0.0",
   "description": "MCP server for Todoist API - full feature parity with the official connector",
   "type": "module",
