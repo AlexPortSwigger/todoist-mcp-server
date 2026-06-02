@@ -1,4 +1,4 @@
-bundle_name := "todoist-mcp-server.mcpb"
+bundle_name := "todoist-custom.mcpb"
 stage_dir   := "build-mcpb"
 
 # List available recipes

@@ -31,8 +31,8 @@ jobs:
       - name: Rename asset with version tag
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          mv todoist-mcp-server.mcpb "todoist-mcp-server-${VERSION}.mcpb"
-          echo "ASSET_NAME=todoist-mcp-server-${VERSION}.mcpb" >> "$GITHUB_ENV"
+          mv todoist-custom.mcpb "todoist-custom-${VERSION}.mcpb"
+          echo "ASSET_NAME=todoist-custom-${VERSION}.mcpb" >> "$GITHUB_ENV"
 
       - name: Determine prerelease
         id: prerelease

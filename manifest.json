@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.2",
-  "name": "Todoist",
-  "display_name": "Todoist",
-  "version": "2.0.0",
+  "name": "todoist-custom",
+  "display_name": "Todoist-custom",
+  "version": "2.0.2",
   "description": "MCP server for the Todoist API v1 with 44 tools (tasks, projects, sections, comments, labels, search, archive).",
   "long_description": "Provides full feature parity with the official Todoist connector. Includes read-only/write/destructive tool annotations so Claude Desktop groups them correctly.",
   "author": {
