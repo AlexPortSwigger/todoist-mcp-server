@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Build bundle
+        run: just bundle
+
+      - name: Rename asset with version tag
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mv todoist-mcp-server.mcpb "todoist-mcp-server-${VERSION}.mcpb"
+          echo "ASSET_NAME=todoist-mcp-server-${VERSION}.mcpb" >> "$GITHUB_ENV"
+
+      - name: Determine prerelease
+        id: prerelease
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *"-"* ]]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.value }}
+          generate_release_notes: true
+          files: ${{ env.ASSET_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
